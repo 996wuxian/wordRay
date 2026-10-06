@@ -1,0 +1,23 @@
+/*
+ * 图标样式。放在图标模块旁边并由 icons.tsx 自己引入，
+ * 这样面板（App）与设置窗（SettingsView）两个入口都自动拿到，
+ * 不必在各自的样式表里各写一份。
+ */
+
+.app-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+  flex-shrink: 0;
+}
+
+@keyframes app-icon-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.app-icon.spin {
+  animation: app-icon-spin 0.9s linear infinite;
+}

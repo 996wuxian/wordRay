@@ -1,0 +1,107 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "WordRay",
+  "mainBinaryName": "WordRay",
+  "version": "0.1.0",
+  "identifier": "com.wuxian.wordray",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "label": "panel",
+        "url": "index.html",
+        "title": "WordRay",
+        "width": 440,
+        "height": 280,
+        "minWidth": 300,
+        "minHeight": 170,
+        "resizable": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "focus": false,
+        "shadow": true,
+        "visible": false,
+        "backgroundColor": "#1a1c20"
+      },
+      {
+        "label": "icon",
+        "url": "icon.html",
+        "title": "WordRay · 划词",
+        "width": 40,
+        "height": 40,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "focus": false,
+        "shadow": false,
+        "visible": false
+      },
+      {
+        "label": "settings",
+        "url": "settings.html",
+        "title": "WordRay · 设置",
+        "theme": "Dark",
+        "backgroundColor": "#1a1c20",
+        "width": 560,
+        "height": 540,
+        "minWidth": 460,
+        "minHeight": 420,
+        "resizable": true,
+        "decorations": true,
+        "alwaysOnTop": false,
+        "skipTaskbar": false,
+        "focus": true,
+        "visible": false
+      },
+      {
+        "label": "history",
+        "url": "history.html",
+        "title": "WordRay · 历史记录",
+        "theme": "Dark",
+        "backgroundColor": "#1a1c20",
+        "width": 620,
+        "height": 580,
+        "minWidth": 460,
+        "minHeight": 420,
+        "resizable": true,
+        "decorations": true,
+        "alwaysOnTop": false,
+        "skipTaskbar": false,
+        "focus": true,
+        "visible": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/64x64.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "headerImage": "icons/nsis-header.bmp",
+        "sidebarImage": "icons/nsis-sidebar.bmp",
+        "languages": ["SimpChinese"]
+      }
+    }
+  }
+}

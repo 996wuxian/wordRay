@@ -1,0 +1,331 @@
+@import "./scrollbar.css";
+
+:root {
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font: 13px/1.65 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  background: #1a1c20;
+  color: #e8eaed;
+  -webkit-user-select: none;
+  user-select: none;
+  overflow: hidden;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  border: 1px solid #33373d;
+  border-radius: 10px;
+  background: #1a1c20;
+  overflow: hidden;
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: #22252a;
+  border-bottom: 1px solid #33373d;
+  /* 标题栏是拖动把手 */
+  cursor: grab;
+}
+
+.bar:active {
+  cursor: grabbing;
+}
+
+.title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #b9bec7;
+  letter-spacing: 0.3px;
+  flex: 1;
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #4a4f57;
+  flex: none;
+}
+
+/* 等待划词时它不携带任何信息，显示出来只是噪声 */
+.dot-idle {
+  display: none;
+}
+
+.dot-streaming {
+  background: #4c8dff;
+  animation: pulse 1s ease-in-out infinite;
+}
+.dot-done {
+  background: #35c07a;
+}
+.dot-error {
+  background: #e5534b;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+/* 图标按钮。面板窄，一律「图标 + 悬浮提示」，不再放文字。
+   图标本身来自 components/icons.tsx（Tabler Icons），颜色走 currentColor。 */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: #a3a9b2;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.icon-btn:hover:not(:disabled) {
+  background: #33373d;
+  color: #e8eaed;
+}
+
+.icon-btn:focus-visible {
+  outline: 1px solid #4c8dff;
+  outline-offset: 1px;
+}
+
+.icon-btn:disabled {
+  opacity: 0.32;
+  cursor: default;
+}
+
+/* 表示"已开启 / 处于该状态" */
+.icon-btn.is-on {
+  color: #6fa8ff;
+}
+
+.icon-btn.is-on:hover:not(:disabled) {
+  background: #26303f;
+  color: #8dbcff;
+}
+
+/* 表示"刚刚成功"（如已复制） */
+.icon-btn.is-ok {
+  color: #4bbd80;
+}
+
+.body {
+  flex: 1;
+  padding: 10px 12px;
+  overflow-y: auto;
+}
+
+/*
+ * 宽版：原文在左、译文在右。
+ *
+ * 两栏**各自滚动**，否则一栏很长时会把另一栏挤出视口。
+ * 为此父容器不滚动（overflow: hidden），滚动交给两个 .block。
+ */
+.body.is-wide {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 16px;
+  overflow: hidden;
+}
+
+.body.is-wide .block {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.body.is-wide .block + .block {
+  margin-top: 0;
+}
+
+.body.is-wide .block-source {
+  padding-right: 16px;
+  border-right: 1px solid #33373d;
+}
+
+/* 宽版里原文不再截断，改为整栏滚动 */
+.body.is-wide .source,
+.body.is-wide .result {
+  max-height: none;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.hint {
+  margin: 0;
+  color: #8a9099;
+}
+
+.block + .block {
+  margin-top: 10px;
+}
+
+.label {
+  font-size: 11px;
+  color: #7d838c;
+  margin-bottom: 3px;
+}
+
+.source {
+  color: #aeb4bd;
+  border-left: 2px solid #3a3f46;
+  padding-left: 8px;
+  user-select: text;
+  /*
+   * 不要静默截断。之前是 `overflow: hidden` + 4.6em，原文长的时候会被切在半句上，
+   * 而且界面上没有任何提示——截图里就撞到了这个。
+   * 现在限定高度但允许滚动，文字一条都不会丢。
+   */
+  max-height: 6em;
+  overflow-y: auto;
+}
+
+.result {
+  color: #e8eaed;
+  user-select: text;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 原文 ↔ 译文联动高亮：亮黄底 + 深色字，像记号笔划过 */
+.hl {
+  background: #f0c94a;
+  color: #14161a;
+  border-radius: 2px;
+}
+
+/* 保留选中栏的文本节点，只取消旧标记的颜色，避免重绘破坏原生选区。 */
+.is-selecting .hl {
+  background: transparent;
+  color: inherit;
+}
+
+.align-hint {
+  margin-left: 8px;
+  padding: 0 5px;
+  font-size: 10px;
+  color: #7fd0a0;
+  border: 1px solid #2f5544;
+  border-radius: 4px;
+}
+
+/* 对齐不可用时用警示色，和"已就绪"区分开 */
+.align-hint-warn {
+  color: #d8a24a;
+  border-color: #574327;
+}
+
+.alignment-feedback {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 4px 0 8px;
+  padding: 7px 8px;
+  border: 1px solid #574327;
+  border-radius: 6px;
+  background: #28231b;
+  color: #e2b875;
+  font-size: 11px;
+}
+
+.alignment-feedback-message {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.alignment-retry {
+  flex: none;
+  padding: 2px 8px;
+  border: 1px solid #786044;
+  border-radius: 4px;
+  background: #362c20;
+  color: #f1d6ad;
+  font: inherit;
+  cursor: pointer;
+}
+
+.alignment-retry:hover {
+  background: #493923;
+}
+
+.alignment-retry:focus-visible {
+  outline: 1px solid #6fa8ff;
+  outline-offset: 2px;
+}
+
+.caret {
+  margin-left: 4px;
+  color: #4c8dff;
+}
+
+.error {
+  color: #ff9a92;
+  background: #2a1e1e;
+  border: 1px solid #4a2b2b;
+  border-radius: 6px;
+  padding: 8px 10px;
+  user-select: text;
+}
+
+.foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 10px;
+  border-top: 1px solid #33373d;
+  background: #22252a;
+}
+
+.foot-hint {
+  font-size: 11px;
+  color: #6e747d;
+}
+
+.foot-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.history-notice {
+  margin: 0;
+  padding: 6px 10px;
+  border-top: 1px solid #574327;
+  background: #28231b;
+  color: #e2b875;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+  user-select: text;
+}

@@ -1,0 +1,188 @@
+<!doctype html>
+<!-- 真实 App/DOM 选区集成验证；仅模拟 Tauri IPC，不调用翻译接口。通过 Vite 打开。 -->
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><title>选词高亮回归验证</title></head>
+<body>
+  <div id="root" style="height:540px;width:770px;margin:16px"></div>
+  <div style="padding:16px"><button id="run">运行浏览器回归验证</button><p id="summary">等待验证</p><ol id="checks"></ol></div>
+  <script type="module">
+    import React from 'react';
+    import ReactDOM from 'react-dom/client';
+    import { mockIPC, mockWindows } from '@tauri-apps/api/mocks';
+    import { emit } from '@tauri-apps/api/event';
+    import App from '/src/App.tsx';
+    import { offsetIn } from '/src/selectionAlign.ts';
+    import '/src/styles.css';
+    document.body.style.overflow = 'auto';
+    const source = '先试试现在这版。如果你觉得片段内的偏差仍然影响使用，我们再讨论是接受 1–2 秒延迟换精度，还是上词对齐模型。';
+    const translation = "Let's try this current version first. If you feel the deviation within the segment still affects usage, we can discuss whether to accept a 1–2 second delay for accuracy, or move to a word alignment model.";
+    let session = 0;
+    let historyOpens = 0;
+    let calls = [];
+    let fail = false;
+    let noMatch = false;
+    let showRetryProgress = false;
+    const failureSource = '现在改为词语语义对齐，并校验完整单词边界、缓存结果。词组内部首次选词会额外请求接口，短暂等待。';
+    const failureTranslation = "Now it's changed to word-level semantic alignment, with full word boundary validation and cached results. The first word selection within a phrase triggers an extra API request, so there will be a brief wait.";
+    mockWindows('panel');
+    mockIPC(async (command, args) => {
+      if (command === 'get_state') return {hotkey:'Shift + Alt + T', panel_pinned:true, panel_wide:false};
+      if (command === 'open_history') { historyOpens++; return; }
+      if (command === 'align_selection') {
+        const selected = (args.column === 'src' ? args.source : args.translation).slice(args.start,args.end);
+        calls.push({...args, selected});
+        if (showRetryProgress) {
+          await emit('translation://selection-align-status',{session_id:args.sessionId,column:args.column,start:args.start,end:args.end,attempt:2,max_attempts:3});
+        }
+        await pause(selected === '偏差' ? 900 : 350);
+        if (fail) throw new Error('模拟连接失败');
+        if (noMatch) return [];
+        const target = args.column === 'src' ? args.translation : args.source;
+        let word = args.column === 'src' ? ({模型:'model',偏差:'deviation',乙:'model',单词:'word'})[selected] : ({model:'模型',deviation:'偏差'})[selected];
+        if (args.source==='甲以后乙' && args.column==='dst' && selected==='model') word=args.start===6?'甲':'乙';
+        if (!word) return [];
+        const index = selected==='单词' ? target.indexOf('word boundary') : selected==='乙' ? target.lastIndexOf(word) : target.indexOf(word);
+        return [[index,index+word.length]];
+      }
+    }, {shouldMockEvents:true});
+    ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
+    function pause(ms) { return new Promise(resolve => setTimeout(resolve,ms)); }
+    function assert(condition, message) { if (!condition) throw new Error(message); }
+    async function until(condition) { const deadline=Date.now()+5000; while(!condition()) { if(Date.now()>deadline) throw new Error('等待状态超时'); await pause(20); } }
+    async function fixture(s=source,t=translation,pairs=[{src:'上词对齐模型',dst:'move to a word alignment model'},{src:'片段内的偏差',dst:'deviation within the segment'}]) {
+      window.getSelection().removeAllRanges();
+      await emit('translation://start',{session_id:++session,source:s});
+      await emit('translation://done',{session_id:session,full_text:t});
+      await emit('translation://align',{session_id:session,pairs});
+      await until(()=>document.querySelector('.source')?.textContent===s && document.querySelector('.result')?.textContent===t);
+      await pause(30);
+    }
+    function endpoint(container,offset) {
+      const walker=document.createTreeWalker(container,NodeFilter.SHOW_TEXT); let node;
+      while(node=walker.nextNode()) { if(offset<=node.textContent.length) return [node,offset]; offset-=node.textContent.length; }
+      throw new Error('未找到选区端点');
+    }
+    async function select(column,word,elementEndpoints=false,mouse=true) {
+      const container=document.querySelector(column==='src'?'.source':'.result');
+      if(mouse) { container.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,button:0})); await pause(30); }
+      const start=container.textContent.indexOf(word); assert(start>=0,'缺少选中词');
+      const range=document.createRange();
+      if(elementEndpoints) { range.setStart(container,0);range.setEnd(container,container.childNodes.length); }
+      else { range.setStart(...endpoint(container,start));range.setEnd(...endpoint(container,start+word.length)); }
+      const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);
+      if(mouse) document.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,button:0}));
+      await pause(20);
+    }
+    function hits(column) { return [...document.querySelectorAll((column==='src'?'.source':'.result')+' .hl')].map(node=>node.textContent).join(''); }
+    async function clear() { window.getSelection().removeAllRanges();await until(()=>!document.querySelector('.hl')); }
+    const checks=document.getElementById('checks');
+    async function check(label,callback) { await callback();const item=document.createElement('li');item.textContent='通过：'+label;checks.append(item); }
+    document.getElementById('run').onclick=async()=>{
+      checks.textContent='';document.getElementById('summary').textContent='验证中';
+      try {
+        await fixture();
+        await check('截图场景：模型只高亮 model，保留原生选区',async()=>{
+          await select('src','模型');await until(()=>hits('dst')==='model');assert(window.getSelection().toString()==='模型','原生选区丢失');
+        });
+        await check('同一选词复用缓存',async()=>{
+          const count=calls.length;await clear();await select('src','模型');await until(()=>hits('dst')==='model');assert(calls.length===count,'重复请求');
+        });
+        await check('已高亮栏开始新选区时保留原有文本节点',async()=>{
+          const highlighted=document.querySelector('.result .hl').firstChild;
+          document.querySelector('.result').dispatchEvent(new MouseEvent('mousedown',{bubbles:true,button:0}));await pause(30);
+          assert(highlighted.isConnected,'mousedown 删除了选区目标节点');document.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,button:0}));await pause(30);await until(()=>hits('dst')==='model');
+        });
+        await check('拖选期间迟到的对齐表不会重绘选区节点',async()=>{
+          const highlighted=document.querySelector('.result .hl').firstChild;document.querySelector('.result').dispatchEvent(new MouseEvent('mousedown',{bubbles:true,button:0}));await pause(30);
+          await emit('translation://align',{session_id:session,pairs:[{src:'模型',dst:'word alignment model'}]});await pause(30);assert(highlighted.isConnected&&highlighted.textContent==='model','迟到对齐表改写了拖选节点');await select('dst','model');await until(()=>hits('src')==='模型');await fixture();await select('src','模型');await until(()=>hits('dst')==='model');
+        });
+        await check('反向选英文 model 对应中文 模型',async()=>{
+          await select('dst','model');await until(()=>hits('src')==='模型');assert(window.getSelection().toString()==='model','反向选区丢失');
+        });
+        await check('单击取消选择后，迟到对齐表不恢复旧高亮',async()=>{
+          document.querySelector('.source').dispatchEvent(new MouseEvent('mousedown',{bubbles:true,button:0}));window.getSelection().removeAllRanges();document.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,button:0}));await pause(30);
+          await emit('translation://align',{session_id:session,pairs:[{src:'模型',dst:'model'}]});await pause(30);assert(!document.querySelector('.hl'),'清空选区后恢复了旧高亮');await fixture();
+        });
+        await check('快速切换选词丢弃迟到的旧结果',async()=>{
+          await select('src','偏差');await until(()=>calls.some(call=>call.sessionId===session&&call.selected==='偏差'));await select('src','模型');await until(()=>hits('dst')==='model');await pause(1000);assert(hits('dst')==='model','旧响应覆盖新选词');
+        });
+        await check('切换翻译会话丢弃旧结果',async()=>{
+          await fixture();await select('src','偏差');const old=session;await until(()=>calls.some(call=>call.sessionId===old&&call.selected==='偏差'));
+          await fixture('模型很好。','The model is good.',[{src:'模型',dst:'model'},{src:'很好',dst:'is good'}]);await select('src','模型');await until(()=>hits('dst')==='model');await pause(1000);assert(hits('dst')==='model','旧会话结果覆盖当前高亮');
+        });
+        await check('完整词项直接高亮，元素端点也能读取',async()=>{
+          await fixture('模型','model',[{src:'模型',dst:'model'}]);const count=calls.length;await select('src','模型',true);await until(()=>hits('dst')==='model');assert(calls.length===count,'完整词项不应请求');
+        });
+        await check('DOM 多文本节点、emoji 与元素偏移',async()=>{
+          const box=document.createElement('div');box.innerHTML='<span>甲😀</span><span>模型</span>';
+          assert(offsetIn(box,box,1)===3,'元素偏移错误');assert(offsetIn(box,box.lastChild.firstChild,2)===5,'UTF16 错误');assert(offsetIn(box,box,9)===-1,'非法端点应拒绝');
+        });
+        await check('拖选失焦后，键盘选区仍能触发对齐',async()=>{
+          await fixture();document.querySelector('.source').dispatchEvent(new MouseEvent('mousedown',{bubbles:true,button:0}));window.dispatchEvent(new Event('blur'));await select('src','模型',false,false);await until(()=>hits('dst')==='model');
+        });
+        await check('重复词和语序调整通过语义请求消歧',async()=>{
+          await fixture('甲以后乙','first model, second model later',[{src:'甲',dst:'model'},{src:'以后',dst:'later'},{src:'乙',dst:'model'}]);const count=calls.length;
+          await select('src','乙');await until(()=>hits('dst')==='model');assert(calls.length===count+1,'重复目标词必须消歧');assert(document.querySelector('.result .hl').previousSibling.textContent==='first model, second ','高亮了错误的 model');
+          await select('dst','model');await until(()=>hits('src')==='甲');
+        });
+        await check('无语义对应不显示猜测高亮',async()=>{
+          await fixture();await select('src','先试试');await until(()=>document.querySelector('.align-hint')?.textContent==='未找到对应词语');assert(!hits('dst'),'不应猜测高亮');
+        });
+        await check('请求失败有状态提示，重选可重试',async()=>{
+          await fixture();fail=true;await select('src','模型');await until(()=>document.querySelector('.align-hint')?.textContent==='词语对齐失败');assert(!hits('dst'),'失败不应高亮');fail=false;await clear();await select('src','模型');await until(()=>hits('dst')==='model');
+        });
+        await check('第二张截图：单词高亮 word boundary 中的 word',async()=>{
+          await fixture(failureSource,failureTranslation,[]);await select('src','单词');await until(()=>hits('dst')==='word');assert(document.querySelector('.result .hl').nextSibling.textContent.startsWith(' boundary'),'高亮了错误的 word');
+        });
+        await check('自动重试进度可见，旧选区进度不会覆盖',async()=>{
+          showRetryProgress=true;await fixture();await select('src','模型');await until(()=>document.querySelector('.align-hint').textContent.includes('2/3'));
+          await emit('translation://selection-align-status',{session_id:session-1,column:'src',start:0,end:1,attempt:3,max_attempts:3});await pause(30);assert(document.querySelector('.align-hint').textContent.includes('2/3'),'旧进度覆盖当前状态');await until(()=>hits('dst')==='model');showRetryProgress=false;
+        });
+        await check('错误详情直接显示，点击重试保留当前选区',async()=>{
+          await fixture();fail=true;await select('src','模型');await until(()=>document.querySelector('.align-hint').textContent==='词语对齐失败');
+          const detail=document.querySelector('[role="alert"]');assert(detail?.textContent.includes('模拟连接失败'),'具体错误没有直接显示');const button=detail.closest('.alignment-feedback').querySelector('button');assert(button?.textContent.includes('重试'),'缺少重试按钮');
+          const count=calls.length;fail=false;const mouseDown=new MouseEvent('mousedown',{bubbles:true,cancelable:true});button.dispatchEvent(mouseDown);assert(mouseDown.defaultPrevented,'重试按钮未保护原生选区');button.click();await until(()=>hits('dst')==='model');assert(calls.length===count+1,'手动重试未调用接口');assert(window.getSelection().toString()==='模型','重试丢失了选区');
+        });
+        await check('空结果可以重试，忽略同会话其他选区的进度',async()=>{
+          await fixture();noMatch=true;await select('src','模型');await until(()=>document.querySelector('.align-hint').textContent==='未找到对应词语');assert(!hits('dst'),'空结果不应高亮');
+          noMatch=false;showRetryProgress=true;const count=calls.length;document.querySelector('.alignment-retry').click();await until(()=>document.querySelector('.align-hint').textContent.includes('2/3'));
+          await emit('translation://selection-align-status',{session_id:session,column:'src',start:0,end:1,attempt:3,max_attempts:3});await pause(30);assert(document.querySelector('.align-hint').textContent.includes('2/3'),'其他选区进度覆盖当前状态');await until(()=>hits('dst')==='model');assert(calls.length===count+1,'空结果重试未重新请求');showRetryProgress=false;
+        });
+        await check('错误文字可复制，复制后重试仍对齐原来的选词',async()=>{
+          await fixture();fail=true;await select('src','模型');await until(()=>document.querySelector('[role="alert"]'));
+          const detail=document.querySelector('[role="alert"]');const range=document.createRange();range.selectNodeContents(detail);window.getSelection().removeAllRanges();window.getSelection().addRange(range);await pause(50);
+          assert(detail.isConnected&&window.getSelection().toString().includes('模拟连接失败'),'选择报错后错误框消失');range.collapse(true);window.getSelection().removeAllRanges();window.getSelection().addRange(range);await pause(50);assert(detail.isConnected,'反馈区内取消选区不应隐藏错误');
+          range.selectNodeContents(detail);window.getSelection().removeAllRanges();window.getSelection().addRange(range);await pause(30);const count=calls.length;fail=false;document.querySelector('.alignment-retry').click();await until(()=>hits('dst')==='model');assert(calls.length===count+1&&calls.at(-1).selected==='模型','复制错误后重试没有使用原选词');assert(window.getSelection().toString()==='模型','重试没有恢复原选词');
+        });
+        await check('跨错误详情与正文的选区会清除原对齐状态',async()=>{
+          await fixture();fail=true;await select('src','模型');await until(()=>document.querySelector('[role="alert"]'));const detail=document.querySelector('[role="alert"]');const result=document.querySelector('.result');
+          const range=document.createRange();range.setStart(...endpoint(detail,0));range.setEnd(...endpoint(result,5));window.getSelection().removeAllRanges();window.getSelection().addRange(range);await until(()=>!document.querySelector('[role="alert"]'));assert(!document.querySelector('.hl'),'跨区域选区保留了旧高亮');fail=false;
+        });
+        await check('恢复历史后迟到的旧开始事件不会覆盖原文译文',async()=>{
+          await fixture('当前原文','Current translation',[]);const current=session;
+          await emit('translation://start',{session_id:current-1,source:'旧原文'});
+          await emit('translation://delta',{session_id:current-1,text:'Old delta'});
+          await emit('translation://done',{session_id:current-1,full_text:'Old translation'});
+          await pause(30);assert(document.querySelector('.source').textContent==='当前原文'&&document.querySelector('.result').textContent==='Current translation','迟到旧开始事件覆盖了新会话');
+        });
+        await check('历史恢复清理旧选区与缓存，忽略迟到对齐',async()=>{
+          await fixture();await select('src','模型');await until(()=>hits('dst')==='model');const old=session;
+          await fixture('已保存的原文','Saved translation',[]);await emit('translation://align',{session_id:old,pairs:[{src:'原文',dst:'translation'}]});await pause(30);
+          assert(!document.querySelector('.hl'),'恢复历史保留了旧高亮');assert(document.querySelector('.result').textContent==='Saved translation','历史译文改变');
+        });
+        await check('历史按钮位于设置右侧并打开历史窗口',async()=>{
+          const button=document.querySelector('button[aria-label="历史记录"]');assert(button?.previousElementSibling?.getAttribute('aria-label')==='设置','历史按钮位置错误');
+          const before=historyOpens;button.click();await until(()=>historyOpens===before+1);
+        });
+        await check('保存失败提示可见，历史重试成功后立即清除',async()=>{
+          await emit('history://changed',{error:'模拟历史写入失败'});await until(()=>document.querySelector('.history-notice'));
+          assert(document.querySelector('.history-notice').textContent.includes('模拟历史写入失败'),'历史保存错误丢失');
+          await emit('history://status',{error:null});await until(()=>!document.querySelector('.history-notice'));
+        });
+        await fixture();await select('src','模型');await until(()=>hits('dst')==='model');
+        document.getElementById('summary').textContent='全部 24 项通过（Tauri IPC 使用模拟响应；真实 App 渲染和 DOM 选区）';
+      } catch(error) { document.getElementById('summary').textContent='失败：'+error.message; }
+    };
+  </script>
+</body>
+</html>

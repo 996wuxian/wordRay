@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/png" href="/logo.png" />
+    <title>WordRay</title>
+    <style>
+      /*
+       * 前端模块加载失败时的兜底样式。
+       *
+       * 之前出过一次"整个界面纯白"的事故：App.tsx 引用了一个 icons.tsx 里不存在的导出，
+       * 模块图加载失败，React 根本没挂载，而 <div id="root"> 是空的
+       * —— 加上窗口底色是白的，用户看到的就是一片纯白，没有任何线索。
+       * 现在窗口底色（tauri.conf.json 的 backgroundColor）就是面板的深色，
+       * 并且这里放一句静态文字：**React 一旦挂载就会把它整体替换掉**。
+       * 换句话说，看到这行字就说明前端没起来。
+       */
+      .boot {
+        font: 13px/1.7 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+        color: #8a9099;
+        margin: 0;
+        padding: 14px 16px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"><p class="boot">正在加载界面…（若长时间停在这行，说明前端没有启动）</p></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

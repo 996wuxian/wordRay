@@ -1,0 +1,105 @@
+<!doctype html>
+<!-- 真实历史界面与用户操作；仅模拟 Tauri IPC，不读真实历史、不请求翻译接口。 -->
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><title>历史记录回归验证</title></head>
+<body>
+  <div style="height:64px;padding:8px 20px;border-bottom:1px solid #33373d;overflow:auto">
+    <button id="run">运行历史回归验证</button><span id="summary" style="margin-left:12px">等待验证</span>
+    <details><summary>验证详情</summary><ol id="checks"></ol></details>
+  </div>
+  <div id="history-root" style="height:calc(100% - 64px)"></div>
+  <script type="module">
+    import React from 'react';
+    import ReactDOM from 'react-dom/client';
+    import { mockIPC, mockWindows } from '@tauri-apps/api/mocks';
+    import { emit } from '@tauri-apps/api/event';
+    import { HistoryView } from '/src/HistoryView.tsx';
+    import '/src/history.css';
+
+    let entries = [], storageError = null, readFailure = false, openFailure = false;
+    let reads = 0, copiedText = '', opened = [];
+    const root = document.getElementById('history-root');
+    mockWindows('history');
+    mockIPC(async (command, args) => {
+      if (command === 'get_history') {
+        reads++;
+        if (readFailure) throw new Error('模拟读取失败');
+        return {entries:entries.map(entry=>({...entry})),limit:50,error:storageError};
+      }
+      if (command === 'copy_result') { copiedText=args.text; return; }
+      if (command === 'restore_history') {
+        if (openFailure) throw new Error('模拟恢复失败');
+        opened.push({...args}); return;
+      }
+    }, {shouldMockEvents:true});
+    ReactDOM.createRoot(root).render(React.createElement(HistoryView));
+    const pause = ms => new Promise(resolve => setTimeout(resolve,ms));
+    function assert(value,message) { if (!value) throw new Error(message); }
+    async function until(check) {
+      const deadline=Date.now()+3500;
+      while (!check()) { if (Date.now()>deadline) throw new Error('等待界面更新超时'); await pause(20); }
+    }
+    async function refresh(event='history://refresh') {
+      const before=reads; await emit(event,{error:storageError});
+      await until(()=>reads>before && root.querySelector('[aria-busy]')?.getAttribute('aria-busy')==='false');
+    }
+    function openButton() { return [...root.querySelectorAll('button')].find(button=>button.textContent.includes('在面板中查看')); }
+    function retryButton() { return [...root.querySelectorAll('button')].find(button=>button.textContent==='重试'); }
+    async function check(label, action) {
+      await action(); const item=document.createElement('li'); item.textContent='通过：'+label; document.getElementById('checks').append(item);
+    }
+    document.getElementById('run').onclick = async () => {
+      document.getElementById('run').disabled=true;
+      document.getElementById('checks').textContent=''; document.getElementById('summary').textContent='验证中';
+      try {
+        entries=[];storageError=null;readFailure=false;openFailure=false;opened=[];
+        await check('首次为空时显示自动保存提示',async()=>{
+          await refresh();await until(()=>root.textContent.includes('还没有翻译记录'));
+          assert(root.textContent.includes('成功翻译后'),'缺少自动保存说明');
+        });
+        await check('最新50条按顺序完整展示，保留换行与Unicode',async()=>{
+          entries=Array.from({length:50},(_,index)=>({id:`saved-${50-index}`,created_at:Date.now()-index*60000,source:`原文 ${50-index}\n😀 这是一条完整保留的记录。`,translation:`Translation ${50-index}\nKeep punctuation, emoji 😀 and all text.`}));
+          await refresh();await until(()=>root.querySelectorAll('.history-item').length===50);
+          const items=root.querySelectorAll('.history-item');
+          assert(items[0].querySelector('.history-source').textContent===entries[0].source,'最新原文被截断或排序错误');
+          assert(items[49].querySelector('.history-translation').textContent===entries[49].translation,'旧译文缺失');
+          assert(root.textContent.includes('50 / 50'),'历史数量错误');
+        });
+        await check('复制操作使用完整译文并显示成功反馈',async()=>{
+          root.querySelector('button[aria-label="复制译文"]').click();
+          await until(()=>root.querySelector('button[aria-label="已复制译文"]'));
+          assert(copiedText===entries[0].translation,'复制译文不完整');
+        });
+        await check('查看历史只提交已保存ID，不重新提交翻译内容',async()=>{
+          openButton().click();await until(()=>opened.length===1);
+          assert(opened[0].id===entries[0].id&&Object.keys(opened[0]).length===1,'恢复未使用已保存ID');
+          await until(()=>!openButton().disabled);
+        });
+        await check('恢复失败给出提示并允许再次查看',async()=>{
+          openFailure=true;openButton().click();await until(()=>root.textContent.includes('模拟恢复失败'));
+          await until(()=>!openButton().disabled);openFailure=false;openButton().click();await until(()=>opened.length===2);
+          await until(()=>!root.textContent.includes('模拟恢复失败'));
+        });
+        await check('新记录通知刷新列表并显示保存失败',async()=>{
+          entries=[{id:'newest',created_at:Date.now(),source:'新完成的原文',translation:'The newest completed translation.'},...entries].slice(0,50);
+          storageError='模拟写入失败，新记录仅保存在内存中';await refresh('history://changed');
+          await until(()=>root.querySelector('.history-source')?.textContent==='新完成的原文'&&root.textContent.includes('模拟写入失败'));
+          assert(root.querySelector('.history-source').textContent==='新完成的原文','新记录未刷新');
+          assert(root.textContent.includes('模拟写入失败'),'保存错误未显示');
+        });
+        await check('重试恢复保存后清除警告',async()=>{
+          storageError=null;retryButton().click();await until(()=>!root.querySelector('[role="alert"]'));
+          assert(root.querySelectorAll('.history-item').length===50,'重试丢失记录');
+        });
+        await check('读取失败保留已有列表，重试成功可继续查看',async()=>{
+          readFailure=true;await refresh();await until(()=>root.textContent.includes('模拟读取失败'));
+          assert(root.querySelectorAll('.history-item').length===50,'读取失败清空了已有列表');
+          readFailure=false;retryButton().click();await until(()=>!root.querySelector('[role="alert"]'));
+        });
+        document.getElementById('summary').textContent='全部 8 项通过（模拟 IPC，真实历史界面）';
+      } catch(error) { document.getElementById('summary').textContent='失败：'+error.message; }
+      finally { document.getElementById('run').disabled=false; }
+    };
+  </script>
+</body>
+</html>

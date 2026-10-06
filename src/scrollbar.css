@@ -1,0 +1,25 @@
+/* WebView2 内所有滚动区域共用细滚动条，保留滚轮、拖动和键盘滚动。 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  border-radius: 3px;
+  background: #4a4f57;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #68717d;
+}
+
+::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}

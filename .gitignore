@@ -1,0 +1,39 @@
+# Rust / Cargo
+/target
+**/*.rs.bk
+
+# Node / 前端
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Tauri
+/src-tauri/target
+/src-tauri/gen/schemas
+
+# 构建与调试日志
+build.log
+*.log
+
+# 构建产物
+*.exe
+*.msi
+*.nsis.zip
+*.dmg
+*.app
+
+# 编辑器 / 系统
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+
+# 密钥与本地配置 —— 绝不提交
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets/

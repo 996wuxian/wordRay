@@ -1,0 +1,213 @@
+@import "./scrollbar.css";
+
+:root {
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#settings-root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font: 13px/1.7 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  background: #1a1c20;
+  color: #e8eaed;
+}
+
+.page {
+  padding: 18px 20px 24px;
+  max-width: 720px;
+}
+
+h1 {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0 0 14px;
+}
+
+.block {
+  background: #22252a;
+  border: 1px solid #33373d;
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin-bottom: 12px;
+}
+
+.block + .block {
+  margin-top: 0;
+}
+
+.field {
+  display: block;
+}
+
+.field + .field {
+  margin-top: 12px;
+}
+
+.name {
+  display: block;
+  font-size: 12px;
+  color: #a4adb8;
+  margin-bottom: 5px;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+}
+
+input[type="text"],
+input[type="password"] {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  padding: 7px 10px;
+  border: 1px solid #3d434b;
+  border-radius: 7px;
+  background: #1a1c20;
+  color: inherit;
+}
+
+input:focus {
+  outline: 2px solid #6fa8ff;
+  outline-offset: -1px;
+  border-color: #6fa8ff;
+}
+
+button {
+  font: inherit;
+  padding: 7px 14px;
+  border: 1px solid #3d434b;
+  border-radius: 7px;
+  background: #262a30;
+  color: inherit;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  background: #2f343c;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+button.primary {
+  background: #3b6fd4;
+  border-color: #3b6fd4;
+  color: #ffffff;
+}
+
+button.primary:hover:not(:disabled) {
+  background: #3363c0;
+}
+
+button.mini {
+  padding: 7px 10px;
+  font-size: 12px;
+  flex: none;
+}
+
+/* 图标按钮：方形、内容居中。图标本身来自 components/icons.tsx */
+button.icon-only {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 7px;
+  line-height: 1;
+  flex: none;
+}
+
+button.mini.icon-only {
+  padding: 7px 9px;
+}
+
+button:focus-visible {
+  outline: 2px solid #6fa8ff;
+  outline-offset: 1px;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  background: transparent;
+  border: 0;
+  padding: 0;
+}
+
+.note {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: #8a919b;
+}
+
+.note code,
+.foot code {
+  background: #2c3138;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+.source {
+  margin: 8px 0 0;
+  font-size: 12px;
+  border-radius: 6px;
+  padding: 6px 9px;
+}
+
+.source-ok {
+  background: #1e3226;
+  color: #7fd0a0;
+}
+
+.source-env {
+  background: #1f2836;
+  color: #93b4ea;
+}
+
+.source-bad {
+  background: #33211f;
+  color: #f0958c;
+}
+
+.status {
+  margin: 12px 0 0;
+  font-size: 12px;
+  border-radius: 6px;
+  padding: 8px 10px;
+  user-select: text;
+}
+
+.status-ok {
+  background: #1e3226;
+  color: #7fd0a0;
+}
+
+.status-error {
+  background: #33211f;
+  color: #f0958c;
+  white-space: pre-wrap;
+}
+
+.status-busy {
+  background: #262a30;
+  color: #a4adb8;
+}
+
+.foot {
+  margin-top: 16px;
+  font-size: 11px;
+  color: #8a919b;
+  word-break: break-all;
+}

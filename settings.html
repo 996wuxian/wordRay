@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/png" href="/logo.png" />
+    <title>WordRay · 设置</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        background: #1a1c20;
+      }
+      /* 同 index.html：前端没起来时至少让人看到一行字，而不是空白 */
+      .boot {
+        font: 13px/1.7 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+        color: #8a919b;
+        margin: 0;
+        padding: 18px 20px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="settings-root"><p class="boot">正在加载设置界面…</p></div>
+    <script type="module" src="/src/settings.tsx"></script>
+  </body>
+</html>

@@ -14,7 +14,7 @@ export default defineConfig({
     outDir: "dist",
     target: "chrome110",
     emptyOutDir: true,
-    rollupOptions: {
+    rolldownOptions: {
       // 四个 WebView 入口：翻译面板 / 划词图标 / 设置 / 历史记录
       input: {
         main: "index.html",

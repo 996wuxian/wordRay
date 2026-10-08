@@ -23,7 +23,7 @@ WordRay 是 Windows 划词翻译工具：在**任意应用**里选中文字，�
 | --- | --- |
 | 桌面框架 | Tauri 2 |
 | 后端 | Rust 2021、`windows-rs`（SendInput / 前台窗口类名）、`arboard`（剪贴板文本）、`reqwest` + `tokio`（SSE 流式） |
-| 前端 | React 18、TypeScript、Vite |
+| 前端 | React 19、TypeScript、Vite |
 | 密钥存储 | Windows DPAPI 加密配置、环境变量 |
 | 翻译历史 | Windows DPAPI 本地加密，保留最新 50 条成功翻译 |
 

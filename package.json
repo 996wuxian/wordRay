@@ -15,18 +15,18 @@
     "app:build": "tauri build"
   },
   "dependencies": {
-    "@tabler/icons-react": "^3.45.0",
-    "@tauri-apps/api": "^2",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "@tabler/icons-react": "^3.49.0",
+    "@tauri-apps/api": "^2.12.1",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2",
-    "@types/react": "^18.3.12",
-    "@types/react-dom": "^18.3.1",
-    "@vitejs/plugin-react": "^4.3.4",
-    "typescript": "^5.6.3",
-    "vite": "^6.0.3",
+    "@tauri-apps/cli": "^2.12.1",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.3",
     "vitest": "^5.0.3"
   }
 }

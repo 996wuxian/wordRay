@@ -29,7 +29,7 @@ function HistoryItem({ entry, onOpen, opening }: {
 }) {
   const [copyState, setCopyState] = useState<"idle" | "busy" | "copied">("idle");
   const [copyError, setCopyError] = useState("");
-  const timer = useRef<ReturnType<typeof setTimeout>>();
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const active = useRef(true);
 
   useEffect(() => {

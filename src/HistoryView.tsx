@@ -13,6 +13,8 @@ interface HistoryEntry {
 interface HistoryPayload {
   entries: HistoryEntry[];
   limit: number;
+  total: number;
+  has_more: boolean;
   error: string | null;
 }
 
@@ -91,20 +93,29 @@ function HistoryItem({ entry, onOpen, opening }: {
 }
 
 export function HistoryView() {
-  const [history, setHistory] = useState<HistoryPayload>({ entries: [], limit: 50, error: null });
+  const [history, setHistory] = useState<HistoryPayload>({
+    entries: [], limit: 1000, total: 0, has_more: false, error: null,
+  });
   const [loadState, setLoadState] = useState<LoadState>("loading");
   const [loadError, setLoadError] = useState("");
+  const [moreError, setMoreError] = useState("");
+  const [moreLoading, setMoreLoading] = useState(false);
   const [eventError, setEventError] = useState("");
   const [openingId, setOpeningId] = useState<string | null>(null);
   const [openError, setOpenError] = useState("");
   const requestVersion = useRef(0);
   const active = useRef(true);
+  const moreInFlight = useRef(false);
+  const contentRef = useRef<HTMLDivElement>(null);
 
   const reload = useCallback(async () => {
     const version = ++requestVersion.current;
+    moreInFlight.current = false;
+    setMoreLoading(false);
+    setMoreError("");
     setLoadState("loading");
     try {
-      const payload = await invoke<HistoryPayload>("get_history");
+      const payload = await invoke<HistoryPayload>("get_history", { offset: 0 });
       if (!active.current || version !== requestVersion.current) return;
       setHistory(payload);
       setLoadState("ready");
@@ -115,6 +126,44 @@ export function HistoryView() {
       setLoadError(String(error));
     }
   }, []);
+
+  const loadMore = useCallback(async () => {
+    if (!active.current || moreInFlight.current || !history.has_more) return;
+    moreInFlight.current = true;
+    const version = requestVersion.current;
+    setMoreLoading(true);
+    setMoreError("");
+    try {
+      const payload = await invoke<HistoryPayload>("get_history", { offset: history.entries.length });
+      if (!active.current || version !== requestVersion.current) return;
+      setHistory((current) => {
+        const ids = new Set(current.entries.map((entry) => entry.id));
+        return {
+          ...payload,
+          entries: [...current.entries, ...payload.entries.filter((entry) => !ids.has(entry.id))],
+        };
+      });
+      if (payload.error) setMoreError(payload.error);
+    } catch (error) {
+      if (active.current && version === requestVersion.current) setMoreError(String(error));
+    } finally {
+      if (active.current && version === requestVersion.current) {
+        moreInFlight.current = false;
+        setMoreLoading(false);
+      }
+    }
+  }, [history.entries.length, history.has_more]);
+
+  useEffect(() => {
+    const content = contentRef.current;
+    const sentinel = content?.querySelector<HTMLElement>("[data-history-sentinel]");
+    if (!content || !sentinel || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) void loadMore();
+    }, { root: content, rootMargin: "120px 0px" });
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [loadMore, history.entries.length]);
 
   useEffect(() => {
     active.current = true;
@@ -153,9 +202,9 @@ export function HistoryView() {
     <main className="history-page">
       <header className="history-header">
         <h1>翻译历史</h1>
-        <p>保留最新 {history.limit} 条 · 新记录在前</p>
-        <span className="history-count" aria-label={`已保留 ${history.entries.length} 条`}>
-          {history.entries.length} / {history.limit}
+        <p>最多保留最新 {history.limit} 条 · 新记录在前</p>
+        <span className="history-count" aria-label={`已加载 ${history.entries.length} 条，共 ${history.total} 条`}>
+          {history.entries.length} / {history.total}
         </span>
       </header>
       {(error || openError) && (
@@ -164,13 +213,27 @@ export function HistoryView() {
           {error && <button disabled={loadState === "loading"} onClick={() => void reload()}>重试</button>}
         </div>
       )}
-      <div className="history-content" aria-busy={loadState === "loading"}>
+      <div ref={contentRef} className="history-content" aria-busy={loadState === "loading" || moreLoading}>
         {history.entries.length > 0 ? (
-          <ol className="history-list">
-            {history.entries.map((entry) => (
-              <HistoryItem key={entry.id} entry={entry} onOpen={(id) => void open(id)} opening={openingId === entry.id} />
-            ))}
-          </ol>
+          <>
+            <ol className="history-list">
+              {history.entries.map((entry) => (
+                <HistoryItem key={entry.id} entry={entry} onOpen={(id) => void open(id)} opening={openingId === entry.id} />
+              ))}
+            </ol>
+            <div className="history-load-more" data-history-sentinel role="status">
+              {moreLoading ? <span>正在加载更多…</span> : moreError ? (
+                <>
+                  <span>加载失败：{moreError}</span>
+                  <button onClick={() => void loadMore()}>重试</button>
+                </>
+              ) : history.has_more ? (
+                <button onClick={() => void loadMore()}>加载更多</button>
+              ) : (
+                <span>已显示全部 {history.total} 条历史记录</span>
+              )}
+            </div>
+          </>
         ) : loadState === "loading" ? (
           <div className="history-loading" role="status">
             <p>正在读取历史记录…</p>

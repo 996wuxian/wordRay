@@ -1,4 +1,4 @@
-//! 最近完成的翻译，本地 DPAPI 加密保存，最多保留 50 条。
+//! 最近完成的翻译，本地 DPAPI 加密保存，最多保留 1000 条。
 
 use std::{
     collections::{HashMap, HashSet},
@@ -16,7 +16,8 @@ use tauri::{AppHandle, Manager};
 
 use crate::settings::dpapi;
 
-pub const LIMIT: usize = 50;
+pub const LIMIT: usize = 1000;
+pub const PAGE_SIZE: usize = 50;
 const FILE_NAME: &str = "history.dpapi";
 const FORMAT_VERSION: u32 = 1;
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
@@ -28,12 +29,28 @@ pub struct HistoryEntry {
     pub created_at: u64,
     pub source: String,
     pub translation: String,
+    /// 历史旧版本默认目标为英文；新记录明确保存翻译目标，避免缓存混用。
+    #[serde(default = "legacy_target_language")]
+    pub target_language: String,
+}
+
+fn legacy_target_language() -> String {
+    "en".to_string()
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct HistorySnapshot {
     pub entries: Vec<HistoryEntry>,
     pub limit: usize,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HistoryPage {
+    pub entries: Vec<HistoryEntry>,
+    pub limit: usize,
+    pub total: usize,
+    pub has_more: bool,
     pub error: Option<String>,
 }
 
@@ -83,10 +100,41 @@ pub fn snapshot(app: &AppHandle) -> HistorySnapshot {
     }
 }
 
-/// 只在流式翻译完整成功后调用；对齐请求失败不影响记录已有完整译文。
-pub fn record(app: &AppHandle, source: &str, translation: &str) -> HistorySnapshot {
+pub fn page(app: &AppHandle, offset: usize) -> HistoryPage {
     match history_path(app) {
-        Ok(path) => record_at(&path, source, translation),
+        Ok(path) => page_at(&path, offset),
+        Err(error) => HistoryPage {
+            entries: Vec::new(),
+            limit: LIMIT,
+            total: 0,
+            has_more: false,
+            error: Some(error),
+        },
+    }
+}
+
+/// 已有原文直接命中本地译文缓存，不必再次请求模型。
+pub fn find_by_source(
+    app: &AppHandle,
+    source: &str,
+    target_language: &str,
+) -> Option<HistoryEntry> {
+    let path = history_path(app).ok()?;
+    snapshot_at(&path)
+        .entries
+        .into_iter()
+        .find(|entry| entry.source == source && entry.target_language == target_language)
+}
+
+/// 只在流式翻译完整成功后调用；对齐请求失败不影响记录已有完整译文。
+pub fn record(
+    app: &AppHandle,
+    source: &str,
+    translation: &str,
+    target_language: &str,
+) -> HistorySnapshot {
+    match history_path(app) {
+        Ok(path) => record_at_for_language(&path, source, translation, target_language),
         Err(error) => unavailable(error),
     }
 }
@@ -118,26 +166,48 @@ fn snapshot_at(path: &Path) -> HistorySnapshot {
     })
 }
 
+fn page_at(path: &Path, offset: usize) -> HistoryPage {
+    with_state(path, |state| {
+        refresh_state(path, state);
+        let total = state.entries.len();
+        let entries = state
+            .entries
+            .iter()
+            .skip(offset)
+            .take(PAGE_SIZE)
+            .cloned()
+            .collect::<Vec<_>>();
+        HistoryPage {
+            has_more: offset.saturating_add(entries.len()) < total,
+            entries,
+            limit: LIMIT,
+            total,
+            error: state.error.clone(),
+        }
+    })
+}
+
 /// UI 的刷新/重试是真正重新读取并重试保存，不让一次临时故障粘在缓存里。
 fn refresh_state(path: &Path, state: &mut HistoryState) {
     match read_entries(path) {
-        Ok(mut entries) => {
-            if state.dirty {
-                let mut seen = HashSet::new();
-                entries = state
+        Ok(entries) => {
+            let mut combined = if state.dirty {
+                state
                     .entries
                     .iter()
                     .chain(entries.iter())
-                    .filter(|entry| seen.insert(entry.id.clone()))
                     .cloned()
-                    .collect();
-                entries.sort_by(|left, right| right.created_at.cmp(&left.created_at));
-                entries.truncate(LIMIT);
-            }
-            state.entries = entries;
+                    .collect()
+            } else {
+                entries.clone()
+            };
+            let normalized = normalize_entries(&mut combined);
+            let needs_save = state.dirty || normalized;
+            state.entries = combined;
             state.read_error = None;
             state.error = None;
-            if state.dirty {
+            if needs_save {
+                state.dirty = true;
                 persist_state(path, state);
             }
         }
@@ -150,6 +220,19 @@ fn refresh_state(path: &Path, state: &mut HistoryState) {
             });
         }
     }
+}
+
+/// 保留同一原文最近的一份译文，并按时间从新到旧排列。
+fn normalize_entries(entries: &mut Vec<HistoryEntry>) -> bool {
+    let previous = entries.clone();
+    entries.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    let mut seen_ids = HashSet::new();
+    let mut seen_sources = HashSet::new();
+    entries.retain(|entry| {
+        seen_ids.insert(entry.id.clone()) && seen_sources.insert(entry.source.clone())
+    });
+    entries.truncate(LIMIT);
+    *entries != previous
 }
 
 fn persist_state(path: &Path, state: &mut HistoryState) {
@@ -166,6 +249,15 @@ fn persist_state(path: &Path, state: &mut HistoryState) {
 }
 
 fn record_at(path: &Path, source: &str, translation: &str) -> HistorySnapshot {
+    record_at_for_language(path, source, translation, "en")
+}
+
+fn record_at_for_language(
+    path: &Path,
+    source: &str,
+    translation: &str,
+    target_language: &str,
+) -> HistorySnapshot {
     with_state(path, |state| {
         if source.trim().is_empty() || translation.trim().is_empty() {
             return state.snapshot();
@@ -174,6 +266,7 @@ fn record_at(path: &Path, source: &str, translation: &str) -> HistorySnapshot {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default();
         let sequence = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        state.entries.retain(|entry| entry.source != source);
         state.entries.insert(
             0,
             HistoryEntry {
@@ -181,9 +274,10 @@ fn record_at(path: &Path, source: &str, translation: &str) -> HistorySnapshot {
                 created_at: timestamp.as_millis() as u64,
                 source: source.to_string(),
                 translation: translation.to_string(),
+                target_language: target_language.to_string(),
             },
         );
-        state.entries.truncate(LIMIT);
+        let _ = normalize_entries(&mut state.entries);
         state.dirty = true;
         persist_state(path, state);
         state.snapshot()
@@ -192,12 +286,15 @@ fn record_at(path: &Path, source: &str, translation: &str) -> HistorySnapshot {
 
 fn load_state(path: &Path) -> HistoryState {
     match read_entries(path) {
-        Ok(entries) => HistoryState {
-            entries,
-            error: None,
-            read_error: None,
-            dirty: false,
-        },
+        Ok(mut entries) => {
+            let dirty = normalize_entries(&mut entries);
+            HistoryState {
+                entries,
+                error: None,
+                read_error: None,
+                dirty,
+            }
+        }
         Err(error) => HistoryState {
             entries: Vec::new(),
             error: Some(error.clone()),
@@ -225,7 +322,6 @@ fn read_entries(path: &Path) -> Result<Vec<HistoryEntry>, String> {
     }) {
         return Err("历史记录包含不完整内容".to_string());
     }
-    stored.entries.truncate(LIMIT);
     Ok(stored.entries)
 }
 
@@ -349,9 +445,9 @@ mod tests {
     }
 
     #[test]
-    fn keeps_latest_fifty_complete_results_and_persists_order() {
+    fn keeps_latest_thousand_complete_results_and_persists_order() {
         let fixture = Fixture::new();
-        for index in 0..63 {
+        for index in 0..(LIMIT + 13) {
             assert!(record_at(
                 &fixture.path(),
                 &format!("原文 {index}"),
@@ -362,13 +458,16 @@ mod tests {
         }
         fixture.forget_cache();
         let snapshot = snapshot_at(&fixture.path());
-        assert_eq!(snapshot.limit, 50);
-        assert_eq!(snapshot.entries.len(), 50);
-        assert_eq!(snapshot.entries.first().unwrap().source, "原文 62");
+        assert_eq!(snapshot.limit, LIMIT);
+        assert_eq!(snapshot.entries.len(), LIMIT);
+        assert_eq!(
+            snapshot.entries.first().unwrap().source,
+            format!("原文 {}", LIMIT + 12)
+        );
         assert_eq!(snapshot.entries.last().unwrap().translation, "Result 13");
         let ids: std::collections::HashSet<_> =
             snapshot.entries.iter().map(|entry| &entry.id).collect();
-        assert_eq!(ids.len(), 50);
+        assert_eq!(ids.len(), LIMIT);
     }
 
     #[test]

@@ -43,6 +43,9 @@ static PANEL_PINNED: Mutex<bool> = Mutex::new(false);
 /// 由 Rust 侧持有：窗口尺寸是 Rust 在改，前端只负责按这个标志渲染。
 static PANEL_WIDE: Mutex<bool> = Mutex::new(false);
 
+/// 用户手动选定后不再按文本长度覆盖布局，并在重启时从配置恢复。
+static PANEL_LAYOUT_PREFERENCE: Mutex<Option<bool>> = Mutex::new(None);
+
 const ICON_SIZE: i32 = 40;
 
 /// 面板窄版：竖排（原文在上、译文在下）
@@ -76,7 +79,53 @@ fn panel_size(wide: bool) -> (i32, i32) {
 /// 界面只显示分隔符之前的内容（见 `deepseek::stream_chat_split`）。
 const ALIGN_MARKER: &str = "#ALIGN#";
 
-const SYSTEM_PROMPT: &str = concat!(
+#[derive(Clone, Copy)]
+enum TranslationDirection {
+    ChineseToEnglish,
+    EnglishToChinese,
+}
+
+impl TranslationDirection {
+    fn target_language(self) -> &'static str {
+        match self {
+            Self::ChineseToEnglish => "en",
+            Self::EnglishToChinese => "zh",
+        }
+    }
+
+    fn translation_prompt(self) -> &'static str {
+        match self {
+            Self::ChineseToEnglish => SYSTEM_PROMPT_CHINESE_TO_ENGLISH,
+            Self::EnglishToChinese => SYSTEM_PROMPT_ENGLISH_TO_CHINESE,
+        }
+    }
+
+    fn alignment_prompt(self) -> &'static str {
+        match self {
+            Self::ChineseToEnglish => ALIGN_SYSTEM_PROMPT_CHINESE_TO_ENGLISH,
+            Self::EnglishToChinese => ALIGN_SYSTEM_PROMPT_ENGLISH_TO_CHINESE,
+        }
+    }
+}
+
+fn translation_direction(text: &str) -> TranslationDirection {
+    if text.chars().any(|character| {
+        matches!(
+            character as u32,
+            0x3400..=0x4DBF
+                | 0x4E00..=0x9FFF
+                | 0xF900..=0xFAFF
+                | 0x20000..=0x2FA1F
+                | 0x30000..=0x323AF
+        )
+    }) {
+        TranslationDirection::ChineseToEnglish
+    } else {
+        TranslationDirection::EnglishToChinese
+    }
+}
+
+const SYSTEM_PROMPT_CHINESE_TO_ENGLISH: &str = concat!(
     "你是翻译引擎。把用户输入的中文翻译成自然、地道的英文。保留专有名词、代码与术语不译。\n",
     "\n",
     "输出格式（严格遵守）：\n",
@@ -100,6 +149,28 @@ const SYSTEM_PROMPT: &str = concat!(
     "{\"src\":\"会加上\",\"dst\":\"will be added\"}]"
 );
 
+const SYSTEM_PROMPT_ENGLISH_TO_CHINESE: &str = concat!(
+    "你是翻译引擎。把用户输入的英文翻译成自然、准确的简体中文。保留专有名词、代码与术语不译。\n",
+    "\n",
+    "输出格式（严格遵守）：\n",
+    "先只输出译文，不要解释、不要加引号。\n",
+    "然后单独一行输出：#ALIGN#\n",
+    "然后输出一个 JSON 数组，把原文切成**细粒度**片段，并给出每段在译文中对应的片段：\n",
+    "[{\"src\":\"原文片段\",\"dst\":\"译文片段\"}]\n",
+    "约束：\n",
+    "- src 必须是原文的连续子串；按顺序拼接后要等于原文，不得漏字或改写\n",
+    "- dst 必须是译文的连续子串。**中英文语序不同，所以 dst 不要求和 src 同序**\n",
+    "- 切分必须按最小语义词：独立英文单词与短语分开；中文词语也尽量细分，避免整句合并；\n",
+    "  绝不能整句一整段地给，否则用户选中一个词时定位不到对应的译文\n",
+    "- 片段数量与原文词数成正比，不要为了减少段数而合并独立词\n",
+    "- #ALIGN# 之后除了那个 JSON 数组，不要再输出任何内容\n",
+    "\n",
+    "示例：\n",
+    "原文：I love natural language processing.\n",
+    "译文：我喜欢自然语言处理。\n",
+    "[{\"src\":\"I \",\"dst\":\"我\"},{\"src\":\"love \",\"dst\":\"喜欢\"},{\"src\":\"natural \",\"dst\":\"自然\"},{\"src\":\"language \",\"dst\":\"语言\"},{\"src\":\"processing.\",\"dst\":\"处理。\"}]"
+);
+
 #[derive(Clone)]
 struct Selection {
     text: String,
@@ -108,6 +179,7 @@ struct Selection {
 
 #[derive(Clone, Serialize)]
 struct StatePayload {
+    session_id: u64,
     hotkey: Option<String>,
     panel_pinned: bool,
     panel_wide: bool,
@@ -123,6 +195,9 @@ struct LayoutPayload {
 struct StartPayload {
     session_id: u64,
     source: String,
+    /// 手动编辑请求的标识，让前端保留请求发出后继续输入的草稿。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_id: Option<u64>,
 }
 
 #[derive(Clone, Serialize)]
@@ -143,7 +218,7 @@ struct ErrorPayload {
     message: String,
 }
 
-/// 历史窗口按通知重新读取，避免向每个窗口广播完整的 50 条正文。
+/// 历史窗口按通知分页读取，避免向每个窗口广播完整的历史记录。
 #[derive(Clone, Serialize)]
 struct HistoryChangedPayload {
     error: Option<String>,
@@ -231,7 +306,7 @@ fn alignment_is_good(usable: usize, longest_src: usize, total: usize) -> bool {
 ///
 /// 为什么要有这条路：把对齐表塞进翻译输出里是"零额外请求"，但模型经常不守格式
 /// 或者切得很粗。校验不过就退到这次**只做对齐**的请求——任务单一，遵守率明显更高。
-const ALIGN_SYSTEM_PROMPT: &str = concat!(
+const ALIGN_SYSTEM_PROMPT_CHINESE_TO_ENGLISH: &str = concat!(
     "你是翻译对齐标注器。用户会给你一段中文原文和它的英文译文。\n",
     "把原文切成最小语义词（如「词对齐模型」拆成「词对齐」「模型」，「模型」只对应 model），\n",
     "再给出每个片段在译文中对应的片段，输出一个 JSON 数组：\n",
@@ -243,18 +318,35 @@ const ALIGN_SYSTEM_PROMPT: &str = concat!(
     "- 只输出那个 JSON 数组，不要解释，不要用代码块包裹"
 );
 
+const ALIGN_SYSTEM_PROMPT_ENGLISH_TO_CHINESE: &str = concat!(
+    "你是翻译对齐标注器。用户会给你一段英文原文和它的中文译文。\n",
+    "把原文切成最小语义词，再给出每个片段在译文中对应的片段，输出一个 JSON 数组：\n",
+    "[{\"src\":\"原文片段\",\"dst\":\"译文片段\"}]\n",
+    "约束：\n",
+    "- src 必须是原文的连续子串；按顺序拼接后等于原文，不得漏字或改写\n",
+    "- dst 必须是译文的连续子串；中英文语序不同，所以 dst 不要求和 src 同序\n",
+    "- 每个独立英文单词单独成段，中文按细粒度语义词切分\n",
+    "- 只输出那个 JSON 数组，不要解释，不要用代码块包裹"
+);
+
 async fn request_alignment(
     config: &deepseek::Config,
     source: &str,
     translation: &str,
+    direction: TranslationDirection,
 ) -> Result<Vec<AlignPair>, String> {
     let user = format!("原文：\n{source}\n\n译文：\n{translation}");
-    let reply = deepseek::stream_chat(config, Some(ALIGN_SYSTEM_PROMPT), &user, |_| {}).await?;
+    let reply =
+        deepseek::stream_chat(config, Some(direction.alignment_prompt()), &user, |_| {}).await?;
     parse_alignment(&reply).ok_or_else(|| "对齐 JSON 解析失败".to_string())
 }
 
 fn next_session() -> u64 {
     SESSION.fetch_add(1, Ordering::SeqCst) + 1
+}
+
+fn is_current_session(session: u64) -> bool {
+    SESSION.load(Ordering::SeqCst) == session
 }
 
 // ---------------------------------------------------------------- 窗口
@@ -432,6 +524,11 @@ fn hide_icon(app: &AppHandle) {
 /// 应用面板形态：改窗口尺寸、记住状态、通知前端。返回实际使用的尺寸
 /// （宽版可能被显示器宽度限制得更窄）。
 fn apply_panel_size(app: &AppHandle, wide: bool, probe: (i32, i32)) -> (i32, i32) {
+    let wide = PANEL_LAYOUT_PREFERENCE
+        .lock()
+        .ok()
+        .and_then(|preference| *preference)
+        .unwrap_or(wide);
     let (mut width, height) = panel_size(wide);
 
     if wide {
@@ -497,7 +594,7 @@ fn restore_panel(app: &AppHandle) {
     }
 }
 
-/// 两项托盘菜单都是纯文本，不需要 Windows 为勾选标记预留的左侧列。
+/// 托盘菜单都是纯文本，不需要 Windows 为勾选标记预留的左侧列。
 #[cfg(target_os = "windows")]
 fn remove_menu_checkmark_space<R: tauri::Runtime>(
     menu: &Menu<R>,
@@ -523,9 +620,10 @@ fn remove_menu_checkmark_space<R: tauri::Runtime>(
 }
 
 fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    let open_item = MenuItem::with_id(app, "open-panel", "打开 WordRay", true, None::<&str>)?;
     let settings_item = MenuItem::with_id(app, "open-settings", "设置", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "退出 WordRay", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&settings_item, &quit_item])?;
+    let menu = Menu::with_items(app, &[&open_item, &settings_item, &quit_item])?;
     #[cfg(target_os = "windows")]
     if let Err(err) = remove_menu_checkmark_space(&menu) {
         println!("[WordRay] 无法取消托盘菜单的勾选占位：{err}");
@@ -540,6 +638,7 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
+            "open-panel" => restore_panel(app),
             "open-settings" => open_settings(app.clone()),
             "quit" => app.exit(0),
             _ => {}
@@ -564,6 +663,9 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 // ---------------------------------------------------------------- 翻译
 
 fn emit_error(app: &AppHandle, session: u64, message: impl Into<String>) {
+    if !is_current_session(session) {
+        return;
+    }
     let _ = app.emit(
         "translation://error",
         ErrorPayload {
@@ -573,18 +675,74 @@ fn emit_error(app: &AppHandle, session: u64, message: impl Into<String>) {
     );
 }
 
-fn begin_translation(app: &AppHandle, text: String) {
-    // 取一份所有权：下面的 async 块要求捕获的东西是 'static
-    let app = app.clone();
-
+fn fail_translation(app: &AppHandle, message: impl Into<String>) {
     let session = next_session();
     let _ = app.emit(
         "translation://start",
         StartPayload {
             session_id: session,
-            source: text.clone(),
+            source: String::new(),
+            request_id: None,
         },
     );
+    emit_error(app, session, message);
+}
+
+fn begin_translation(app: &AppHandle, text: String) {
+    begin_translation_with_request(app, text, None, next_session());
+}
+
+fn begin_translation_with_request(
+    app: &AppHandle,
+    mut text: String,
+    request_id: Option<u64>,
+    session: u64,
+) -> u64 {
+    // 取一份所有权：下面的 async 块要求捕获的东西是 'static
+    let app = app.clone();
+
+    if !is_current_session(session) {
+        return session;
+    }
+    // 空白输入也要开启新会话，停止接收上一版原文的结果并清空面板。
+    // 非空文本保留空格、换行等原始格式，供模型和词对齐使用。
+    if text.trim().is_empty() {
+        text.clear();
+    }
+    let _ = app.emit(
+        "translation://start",
+        StartPayload {
+            session_id: session,
+            source: text.clone(),
+            request_id,
+        },
+    );
+
+    if text.is_empty() {
+        return session;
+    }
+
+    let direction = translation_direction(&text);
+    if let Some(entry) = history::find_by_source(&app, &text, direction.target_language()) {
+        if !is_current_session(session) {
+            return session;
+        }
+        let _ = app.emit(
+            "translation://done",
+            DonePayload {
+                session_id: session,
+                full_text: entry.translation,
+            },
+        );
+        let _ = app.emit(
+            "translation://align",
+            AlignPayload {
+                session_id: session,
+                pairs: Vec::new(),
+            },
+        );
+        return session;
+    }
 
     let current = settings::load(&app);
     let Some(api_key) = current.api_key.clone() else {
@@ -593,7 +751,7 @@ fn begin_translation(app: &AppHandle, text: String) {
             session,
             "还没有配置 DeepSeek API Key：点面板上的「设置」填一个即可",
         );
-        return;
+        return session;
     };
 
     let config = deepseek::Config {
@@ -602,14 +760,20 @@ fn begin_translation(app: &AppHandle, text: String) {
         model: current.model,
     };
 
+    if !is_current_session(session) {
+        return session;
+    }
     let app_for_delta = app.clone();
     tauri::async_runtime::spawn(async move {
         let outcome = deepseek::stream_chat_split(
             &config,
-            Some(SYSTEM_PROMPT),
+            Some(direction.translation_prompt()),
             &text,
             Some(ALIGN_MARKER),
             |delta| {
+                if !is_current_session(session) {
+                    return;
+                }
                 let _ = app_for_delta.emit(
                     "translation://delta",
                     DeltaPayload {
@@ -621,6 +785,9 @@ fn begin_translation(app: &AppHandle, text: String) {
         )
         .await;
 
+        if !is_current_session(session) {
+            return;
+        }
         match outcome {
             Ok(outcome) => {
                 // 先把译文发出去：界面不该为了对齐表而多等
@@ -633,7 +800,11 @@ fn begin_translation(app: &AppHandle, text: String) {
                 );
 
                 // 完整译文到达即保存；后续对齐失败仍可回看这次翻译。
-                let saved = history::record(&app, &text, &outcome.text);
+                if !is_current_session(session) {
+                    return;
+                }
+                let saved =
+                    history::record(&app, &text, &outcome.text, direction.target_language());
                 let _ = app.emit(
                     "history://changed",
                     HistoryChangedPayload { error: saved.error },
@@ -645,11 +816,14 @@ fn begin_translation(app: &AppHandle, text: String) {
                 let mut origin = "内嵌";
 
                 if !alignment_is_good(usable, longest, pairs.len()) {
+                    if !is_current_session(session) {
+                        return;
+                    }
                     println!(
                         "[WordRay] 内嵌对齐表不可用（可用 {usable}/{} 对，最长片段 {longest} 字），改用专门的对齐请求",
                         pairs.len()
                     );
-                    match request_alignment(&config, &text, &outcome.text).await {
+                    match request_alignment(&config, &text, &outcome.text, direction).await {
                         Ok(better) => {
                             let (better_usable, better_longest) =
                                 assess_alignment(&text, &outcome.text, &better);
@@ -664,6 +838,9 @@ fn begin_translation(app: &AppHandle, text: String) {
                     }
                 }
 
+                if !is_current_session(session) {
+                    return;
+                }
                 if usable > 0 {
                     println!(
                         "[WordRay] 对齐表：{usable} 对可用（最长 src 片段 {longest} 字，来源：{origin}）"
@@ -684,6 +861,7 @@ fn begin_translation(app: &AppHandle, text: String) {
             Err(err) => emit_error(&app, session, err),
         }
     });
+    session
 }
 
 // ---------------------------------------------------------------- 命令
@@ -691,10 +869,47 @@ fn begin_translation(app: &AppHandle, text: String) {
 #[tauri::command]
 fn get_state() -> StatePayload {
     StatePayload {
+        session_id: SESSION.load(Ordering::SeqCst),
         hotkey: ACTIVE_HOTKEY.lock().ok().and_then(|guard| guard.clone()),
         panel_pinned: PANEL_PINNED.lock().map(|value| *value).unwrap_or(false),
         panel_wide: PANEL_WIDE.lock().map(|value| *value).unwrap_or(false),
     }
+}
+
+/// 原文编辑失焦后重译，在当前位置调整布局，不显示窗口或夺回焦点。
+#[tauri::command]
+fn translate_text(
+    app: AppHandle,
+    text: String,
+    request_id: u64,
+    session_id: u64,
+) -> Result<u64, String> {
+    // 只有仍在编辑当前原文时才提交，避免迟到的失焦请求覆盖划词或历史恢复。
+    let session = session_id
+        .checked_add(1)
+        .ok_or_else(|| "翻译会话编号已达上限，请重新打开 WordRay".to_string())?;
+    SESSION
+        .compare_exchange(session_id, session, Ordering::SeqCst, Ordering::SeqCst)
+        .map_err(|_| "原文已更新，请按当前内容重新翻译".to_string())?;
+    let wide = !text.trim().is_empty() && wants_wide_layout(&text);
+    let probe = app
+        .get_webview_window("panel")
+        .and_then(|win| win.outer_position().ok())
+        .map(|position| (position.x, position.y))
+        .unwrap_or((0, 0));
+    let (width, height) = apply_panel_size(&app, wide, probe);
+    if let Some(win) = app.get_webview_window("panel") {
+        if let Ok(position) = win.outer_position() {
+            let (x, y) = clamp_to_monitor(&app, position.x, position.y, width, height);
+            let _ = win.set_position(PhysicalPosition::new(x, y));
+        }
+    }
+    Ok(begin_translation_with_request(
+        &app,
+        text,
+        Some(request_id),
+        session,
+    ))
 }
 
 /// 手动切换面板形态（竖排 ↔ 左右分栏）。
@@ -702,8 +917,11 @@ fn get_state() -> StatePayload {
 /// **刻意不移动窗口**：用户可能刚把面板拖到顺手的位置，切布局不该把它挪走。
 /// 但尺寸变了之后可能有一部分跑到屏幕外，所以要夹一次。
 #[tauri::command]
-fn toggle_panel_layout(app: AppHandle) {
-    let wide = !PANEL_WIDE.lock().map(|value| *value).unwrap_or(false);
+fn toggle_panel_layout(app: AppHandle, wide: bool) -> Result<(), String> {
+    settings::save_panel_layout(&app, wide)?;
+    if let Ok(mut preference) = PANEL_LAYOUT_PREFERENCE.lock() {
+        *preference = Some(wide);
+    }
 
     let probe = app
         .get_webview_window("panel")
@@ -724,6 +942,7 @@ fn toggle_panel_layout(app: AppHandle) {
         "[WordRay] 面板切换为{}",
         if wide { "左右分栏" } else { "竖排" }
     );
+    Ok(())
 }
 
 /// 用户拖完面板：把当前位置固定下来，后续翻译不再自动挪动它
@@ -830,8 +1049,8 @@ fn open_settings(app: AppHandle) {
 // ---------------------------------------------------------------- 历史
 
 #[tauri::command]
-fn get_history(app: AppHandle) -> history::HistorySnapshot {
-    let snapshot = history::snapshot(&app);
+fn get_history(app: AppHandle, offset: usize) -> history::HistoryPage {
+    let snapshot = history::page(&app, offset);
     // 状态通知不会触发列表再次读取，重试成功后也能清掉面板上的保存失败提示。
     let _ = app.emit(
         "history://status",
@@ -868,6 +1087,7 @@ fn restore_history(app: AppHandle, id: String) -> Result<(), String> {
         StartPayload {
             session_id: session,
             source: entry.source,
+            request_id: None,
         },
     )
     .map_err(|error| error.to_string())?;
@@ -913,9 +1133,8 @@ fn open_panel(app: AppHandle) {
                 begin_translation(&app, selection.text);
             }
             None => {
-                let session = next_session();
                 show_panel(&app, None, false);
-                emit_error(&app, session, "没有识别到选中的文字，请重新划词");
+                fail_translation(&app, "没有识别到选中的文字，请重新划词");
             }
         }
     });
@@ -1145,9 +1364,8 @@ fn handle_hotkey(app: &AppHandle) {
         let text = match clipboard::capture_selection() {
             Ok(text) => text,
             Err(err) => {
-                let session = next_session();
                 show_panel(&app, None, false);
-                emit_error(&app, session, err.to_string());
+                fail_translation(&app, err.to_string());
                 return;
             }
         };
@@ -1174,6 +1392,7 @@ fn main() {
             get_state,
             selection_alignment::align_selection,
             open_panel,
+            translate_text,
             dismiss_icon,
             close_panel,
             copy_result,
@@ -1198,6 +1417,20 @@ fn main() {
         })
         .setup(|app| {
             let handle = app.handle().clone();
+
+            // 在托盘和全局监听启动前恢复布局；get_state 也能返回正确的初始状态。
+            let preferred_layout = settings::load_panel_layout(&handle);
+            if let Ok(mut preference) = PANEL_LAYOUT_PREFERENCE.lock() {
+                *preference = preferred_layout;
+            }
+            if let Some(wide) = preferred_layout {
+                let probe = handle
+                    .get_webview_window("panel")
+                    .and_then(|win| win.outer_position().ok())
+                    .map(|position| (position.x, position.y))
+                    .unwrap_or((0, 0));
+                apply_panel_size(&handle, wide, probe);
+            }
 
             // 0) 图标窗：尽早剥掉系统窗口样式，否则它会被夹到 136×39
             if let Some(icon) = app.get_webview_window("icon") {

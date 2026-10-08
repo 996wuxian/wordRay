@@ -27,6 +27,17 @@ import {
   type RawPair,
   type Span,
 } from "./selectionAlign";
+import SourceEditor from "./components/SourceEditor";
+import {
+  acceptSourceStart,
+  changeSourceDraft,
+  createSourceEditingState,
+  failSourceRequest,
+  isCurrentSourceRequest,
+  isSourceDirty,
+  isWaitingForSourceStart,
+  requestSourceTranslation,
+} from "./sourceEditing";
 
 type Phase = "idle" | "streaming" | "done" | "error";
 type Column = "src" | "dst";
@@ -43,6 +54,7 @@ type WordAlignmentState =
   | { kind: "error"; message: string };
 
 interface StatePayload {
+  session_id: number;
   hotkey: string | null;
   panel_pinned: boolean;
   panel_wide: boolean;
@@ -53,6 +65,7 @@ interface LayoutPayload {
 interface StartPayload {
   session_id: number;
   source: string;
+  request_id?: number;
 }
 interface DeltaPayload {
   session_id: number;
@@ -116,8 +129,14 @@ function rangeInText(container: HTMLElement, [start, end]: Span): Range | null {
 
 export default function App() {
   const activeSession = useRef(0);
+  const latestSession = useRef(0);
+  const sourceEditing = useRef(createSourceEditingState());
+  const sourceRequests = useRef(Promise.resolve());
   const [phase, setPhase] = useState<Phase>("idle");
   const [source, setSource] = useState("");
+  const [draftSource, setDraftSource] = useState("");
+  const [sourceResetKey, setSourceResetKey] = useState(0);
+  const [sourceSubmitting, setSourceSubmitting] = useState(false);
   const [result, setResult] = useState("");
   const [message, setMessage] = useState("");
   const [copied, setCopied] = useState(false);
@@ -126,6 +145,8 @@ export default function App() {
   const [pinned, setPinned] = useState(false);
   // 宽版 = 原文在左、译文在右。窗口尺寸是 Rust 在改，这里只负责按标志渲染。
   const [wide, setWide] = useState(false);
+  const [layoutError, setLayoutError] = useState("");
+  const [layoutSaving, setLayoutSaving] = useState(false);
 
   // 原文 ↔ 译文联动
   const sourceRef = useRef<HTMLDivElement>(null);
@@ -151,9 +172,91 @@ export default function App() {
     [source, result, rawPairs],
   );
 
+  const sourceDirty = isSourceDirty(sourceEditing.current);
+  const clearTextSelection = () => {
+    setHlSrc([]);
+    setHlDst([]);
+    selectionRef.current = null;
+    pointerSelecting.current = false;
+    selectionVersion.current += 1;
+    selectionRequests.current.clear();
+    setTextSelection(null);
+    setSelectionColumn(null);
+    setWordAlignment({ kind: "idle" });
+  };
+
+  const handleTranslationStart = (payload: StartPayload) => {
+    if (payload.session_id < latestSession.current || payload.session_id <= activeSession.current) return;
+    // 已跳过的手动请求也占用了后端 session，后续提交必须使用最新值。
+    latestSession.current = payload.session_id;
+    const accepted = acceptSourceStart(sourceEditing.current, payload.source, payload.request_id);
+    if (!accepted) return;
+    sourceEditing.current = accepted.state;
+    activeSession.current = payload.session_id;
+    setSource(payload.source);
+    setDraftSource(accepted.state.draft);
+    if (accepted.resetEditor) setSourceResetKey((key) => key + 1);
+    setSourceSubmitting(false);
+    setResult("");
+    setMessage("");
+    setCopied(false);
+    setRawPairs([]);
+    setAlignReady(false);
+    clearTextSelection();
+    setPhase(payload.source ? "streaming" : "idle");
+  };
+
+  const changeSource = (text: string) => {
+    sourceEditing.current = changeSourceDraft(sourceEditing.current, text);
+    setDraftSource(text);
+    clearTextSelection();
+  };
+
+  const commitSource = (text: string, retry = false) => {
+    sourceEditing.current = changeSourceDraft(sourceEditing.current, text);
+    setDraftSource(text);
+    const prepared = requestSourceTranslation(sourceEditing.current, retry || phase === "error");
+    sourceEditing.current = prepared.state;
+    const request = prepared.request;
+    if (!request) return;
+    setSourceSubmitting(true);
+    setResult("");
+    setMessage("");
+    setCopied(false);
+    setRawPairs([]);
+    setAlignReady(false);
+    clearTextSelection();
+    setPhase(request.text ? "streaming" : "idle");
+
+    // 串行分配后端 session，连续修改时跳过尚未发送的旧版本。
+    sourceRequests.current = sourceRequests.current.then(async () => {
+      if (!isCurrentSourceRequest(sourceEditing.current, request)) return;
+      try {
+        const sessionId = await invoke<number>("translate_text", {
+          text: request.text, requestId: request.id, sessionId: latestSession.current,
+        });
+        latestSession.current = Math.max(latestSession.current, sessionId);
+        if (isCurrentSourceRequest(sourceEditing.current, request)) {
+          // IPC 回应与 start 事件任一先到都可推进，重复的 start 不再重置译文。
+          handleTranslationStart({ session_id: sessionId, source: request.text, request_id: request.id });
+        }
+      } catch (error: unknown) {
+        const failed = failSourceRequest(sourceEditing.current, request);
+        if (!failed) return;
+        sourceEditing.current = failed;
+        setSourceSubmitting(false);
+        setMessage(typeof error === "string" ? error : error instanceof Error ? error.message : "翻译暂时不可用，请重试。");
+        setPhase("error");
+      }
+    });
+  };
+
   useEffect(() => {
     // 热键是候选链里第一个注册成功的那个，启动时才知道，因此要向 Rust 侧问一次
     void invoke<StatePayload>("get_state").then((state) => {
+      if (Number.isSafeInteger(state.session_id)) {
+        latestSession.current = Math.max(latestSession.current, state.session_id);
+      }
       setHotkey(state.hotkey);
       setPinned(state.panel_pinned);
       setWide(state.panel_wide);
@@ -165,28 +268,10 @@ export default function App() {
       // 面板形态由 Rust 决定（它同时要改窗口尺寸），前端跟着渲染即可
       listen<LayoutPayload>("panel://layout", (e) => setWide(e.payload.wide)),
       listen<StartPayload>("translation://start", (e) => {
-        if (e.payload.session_id < activeSession.current) return;
-        activeSession.current = e.payload.session_id;
-        setSource(e.payload.source);
-        setResult("");
-        setMessage("");
-        setCopied(false);
-        // 新一轮翻译：清掉上一轮的高亮与对齐数据
-        setRawPairs([]);
-        setAlignReady(false);
-        setHlSrc([]);
-        setHlDst([]);
-        selectionRef.current = null;
-        pointerSelecting.current = false;
-        selectionVersion.current += 1;
-        selectionRequests.current.clear();
-        setTextSelection(null);
-        setSelectionColumn(null);
-        setWordAlignment({ kind: "idle" });
-        setPhase("streaming");
+        handleTranslationStart(e.payload);
       }),
       listen<AlignPayload>("translation://align", (e) => {
-        if (e.payload.session_id !== activeSession.current) return;
+        if (e.payload.session_id !== activeSession.current || isWaitingForSourceStart(sourceEditing.current)) return;
         setRawPairs(e.payload.pairs);
         setAlignReady(true);
       }),
@@ -203,22 +288,23 @@ export default function App() {
           : previous);
       }),
       listen<DeltaPayload>("translation://delta", (e) => {
-        if (e.payload.session_id !== activeSession.current) return;
+        if (e.payload.session_id !== activeSession.current || isWaitingForSourceStart(sourceEditing.current)) return;
         setResult((prev) => prev + e.payload.text);
       }),
       listen<DonePayload>("translation://done", (e) => {
-        if (e.payload.session_id !== activeSession.current) return;
+        if (e.payload.session_id !== activeSession.current || isWaitingForSourceStart(sourceEditing.current)) return;
         setResult(e.payload.full_text);
         setPhase("done");
       }),
       listen<ErrorPayload>("translation://error", (e) => {
-        if (e.payload.session_id !== activeSession.current) return;
+        if (e.payload.session_id !== activeSession.current || isWaitingForSourceStart(sourceEditing.current)) return;
         setMessage(e.payload.message);
         setPhase("error");
       }),
     ];
 
     const onKeyDown = (ev: KeyboardEvent) => {
+      if (ev.isComposing || ev.keyCode === 229) return;
       if (ev.key === "Escape") void invoke("close_panel");
     };
     window.addEventListener("keydown", onKeyDown);
@@ -232,7 +318,8 @@ export default function App() {
   // selectionchange 同时覆盖鼠标拖选、双击和键盘调整选区。
   useEffect(() => {
     const readSelection = (force = false) => {
-      if (pointerSelecting.current) return;
+      if (pointerSelecting.current || isSourceDirty(sourceEditing.current) ||
+          isWaitingForSourceStart(sourceEditing.current)) return;
       const selection = window.getSelection();
       let next: TextSelection | null = null;
       if (selection && selection.rangeCount > 0) {
@@ -285,6 +372,12 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (sourceDirty || sourceSubmitting) {
+      setHlSrc([]);
+      setHlDst([]);
+      setWordAlignment({ kind: "idle" });
+      return;
+    }
     // 拖选期间即使整段对齐表迟到，也不能根据上一次选区重绘当前正在操作的一栏。
     if (pointerSelecting.current) return;
     if (!textSelection) {
@@ -340,9 +433,10 @@ export default function App() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [textSelection, phase, source, result, alignment, retryRevision]);
+  }, [textSelection, phase, source, result, alignment, retryRevision, sourceDirty, sourceSubmitting]);
 
   const retrySelectionAlignment = () => {
+    if (sourceDirty || sourceSubmitting) return;
     const current = selectionRef.current;
     if (!current || pointerSelecting.current || phase !== "done" ||
         current.sessionId !== activeSession.current) return;
@@ -389,6 +483,19 @@ export default function App() {
     }
   };
 
+  const toggleLayout = async () => {
+    setLayoutError("");
+    setLayoutSaving(true);
+    try {
+      // 使用点击时看到的布局，避免原文失焦提交同时调整尺寸而反转切换方向。
+      await invoke("toggle_panel_layout", { wide: !wide });
+    } catch (error: unknown) {
+      setLayoutError(typeof error === "string" ? error : error instanceof Error ? error.message : "布局暂时无法保存，请重试。");
+    } finally {
+      setLayoutSaving(false);
+    }
+  };
+
   const copy = async () => {
     if (!result) return;
     await invoke("copy_result", { text: result });
@@ -398,6 +505,7 @@ export default function App() {
 
   // 选中栏只隐藏标记的颜色，保留所有文本节点，让原生拖选和双击的端点保持有效。
   const prepareSelection = (column: Column) => {
+    if (isSourceDirty(sourceEditing.current) || isWaitingForSourceStart(sourceEditing.current)) return;
     pointerSelecting.current = true;
     selectionVersion.current += 1;
     setSelectionColumn(column);
@@ -415,17 +523,12 @@ export default function App() {
     ));
 
   // 状态点的文字说明。纯彩色圆点没人看得懂，必须自带标注。
-  const phaseLabel = {
-    idle: "等待划词",
+  const phaseLabel = sourceSubmitting ? "正在翻译" : sourceDirty ? "原文已修改" : {
+    idle: "等待输入或划词",
     streaming: "正在翻译",
     done: "翻译完成",
     error: "翻译出错",
   }[phase];
-
-  // 只有"原文 + 译文"同时在时才排两栏。
-  // 否则（例如还没配 Key 时同时出现"原文 + 错误"）网格自动排布会把错误挤到下一行，
-  // 宽窗口里单栏反而更清楚。
-  const twoColumn = wide && Boolean(source) && (phase === "streaming" || phase === "done");
 
   /*
    * 把对齐状态直接显示出来。
@@ -477,7 +580,8 @@ export default function App() {
           title={wide ? "切换为竖排（原文在上、译文在下）" : "切换为左右分栏（原文在左、译文在右）"}
           aria-label="切换面板布局"
           aria-pressed={wide}
-          onClick={() => void invoke("toggle_panel_layout")}
+          onClick={() => void toggleLayout()}
+          disabled={layoutSaving}
         >
           {wide ? <IconLayoutRows /> : <IconLayoutColumns />}
         </button>
@@ -500,70 +604,80 @@ export default function App() {
         </button>
       </header>
 
-      <section className={"body" + (twoColumn ? " is-wide" : "")}>
-        {phase === "idle" && (
-          <p className="hint">
-            {hotkey
-              ? `在任意应用里选中中文，然后按 ${hotkey}`
-              : "没有可用的全局热键：候选键都被其他程序占用了"}
+      {layoutError && <p className="error layout-error" role="alert">{layoutError}</p>}
+
+      <section className={"body" + (wide ? " is-wide" : "")}>
+        <div className="block block-source">
+          <div className="label" id="source-label">原文</div>
+          <SourceEditor
+            value={draftSource}
+            resetKey={sourceResetKey}
+            ranges={hlSrc}
+            selecting={selectionColumn === "src"}
+            elementRef={sourceRef}
+            onChange={changeSource}
+            onCommit={commitSource}
+            onPrepareSelection={() => prepareSelection("src")}
+          />
+          <p className="source-editor-hint" id="source-editor-hint">
+            {sourceSubmitting ? "正在重新翻译…" : sourceDirty ? "原文已修改，失去焦点后重新翻译" : "可直接编辑，失去焦点后自动翻译"}
           </p>
-        )}
+          {phase === "idle" && !draftSource && (
+            <p className="hint">
+              {hotkey ? `也可在任意应用中划词，或选中后按 ${hotkey}` : "也可在任意应用中划词，点击浮标翻译"}
+            </p>
+          )}
+        </div>
 
-        {phase !== "idle" && source && (
-          <div className="block block-source">
-            <div className="label">原文</div>
-            <div
-              className={"source" + (selectionColumn === "src" ? " is-selecting" : "")}
-              ref={sourceRef}
-              onMouseDown={() => prepareSelection("src")}
-              title="选中这里的一段文字，右侧会高亮对应的译文"
-            >
-              {renderSlices(source, hlSrc)}
-            </div>
+        <div className="block block-result">
+          <div className="label">
+            译文{phase === "streaming" && <span className="caret">▌</span>}
+            {phase === "done" && !sourceDirty && !sourceSubmitting && (
+              <span className={alignBadgeClass} title={alignBadgeTitle} role="status">
+                {alignBadgeText}
+              </span>
+            )}
           </div>
-        )}
-
-        {phase === "error" && <div className="error">{message}</div>}
-
-        {(phase === "streaming" || phase === "done") && (
-          <div className="block block-result">
-            <div className="label">
-              译文{phase === "streaming" && <span className="caret">▌</span>}
-              {phase === "done" && (
-                <span className={alignBadgeClass} title={alignBadgeTitle} role="status">
-                  {alignBadgeText}
-                </span>
+          {phase === "error" && (
+            <div className="error translation-error" role="alert">
+              <span>{message}</span>
+              {draftSource.trim() && (
+                <button type="button" className="alignment-retry" onClick={() => commitSource(draftSource, true)}>
+                  重试翻译
+                </button>
               )}
             </div>
-            {phase === "done" && alignmentFeedback && (
-              <div className="alignment-feedback" ref={alignmentFeedbackRef}>
-                <p
-                  className="alignment-feedback-message"
-                  role={wordAlignment.kind === "error" ? "alert" : "status"}
-                >
-                  {alignmentFeedback}
-                </p>
-                <button
-                  type="button"
-                  className="alignment-retry"
-                  onMouseDown={(event) => event.preventDefault()}
-                  onClick={retrySelectionAlignment}
-                  aria-label="重试当前选区的词语对齐"
-                >
-                  重试
-                </button>
-              </div>
-            )}
+          )}
+          {phase === "done" && !sourceDirty && !sourceSubmitting && alignmentFeedback && (
+            <div className="alignment-feedback" ref={alignmentFeedbackRef}>
+              <p
+                className="alignment-feedback-message"
+                role={wordAlignment.kind === "error" ? "alert" : "status"}
+              >
+                {alignmentFeedback}
+              </p>
+              <button
+                type="button"
+                className="alignment-retry"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={retrySelectionAlignment}
+                aria-label="重试当前选区的词语对齐"
+              >
+                重试
+              </button>
+            </div>
+          )}
+          {phase !== "error" && (
             <div
               className={"result" + (selectionColumn === "dst" ? " is-selecting" : "")}
               ref={resultRef}
               onMouseDown={() => prepareSelection("dst")}
               title="选中这里的一段文字，左侧会高亮对应的原文"
             >
-              {result ? renderSlices(result, hlDst) : "…"}
+              {result ? renderSlices(result, hlDst) : phase === "streaming" ? "…" : <span className="hint">等待翻译</span>}
             </div>
-          </div>
-        )}
+          )}
+        </div>
       </section>
 
       {historyError && (
@@ -577,7 +691,7 @@ export default function App() {
             title={copied ? "已复制" : "复制译文"}
             aria-label="复制译文"
             onClick={() => void copy()}
-            disabled={!result}
+            disabled={!result || sourceDirty || sourceSubmitting}
           >
             {copied ? <IconCopied /> : <IconCopy />}
           </button>
@@ -591,7 +705,7 @@ export default function App() {
           </button>
           <button
             className="icon-btn"
-            title="历史记录（最近 50 条）"
+            title="历史记录（最近 1000 条）"
             aria-label="历史记录"
             onClick={() => void invoke("open_history")}
           >

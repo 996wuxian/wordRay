@@ -161,6 +161,7 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  min-width: 0;
 }
 
 .body.is-wide .block + .block {
@@ -206,6 +207,74 @@ body {
    * 现在限定高度但允许滚动，文字一条都不会丢。
    */
   max-height: 6em;
+  overflow-y: auto;
+}
+
+.source-editor {
+  min-height: 3.3em;
+  border: 1px solid #3a3f46;
+  border-radius: 6px;
+  background: #22252a;
+  padding: 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  -webkit-user-select: text;
+  cursor: text;
+  caret-color: #6fa8ff;
+  transition: border-color 160ms ease;
+}
+
+.source-editor:focus {
+  outline: none;
+  border-color: #6fa8ff;
+}
+
+.source-editor:focus .hl {
+  background: transparent;
+  color: inherit;
+}
+
+.source-editor[data-empty="true"]::before {
+  content: attr(data-placeholder);
+  color: #8a9099;
+  pointer-events: none;
+}
+
+.source-editor-hint {
+  margin: 4px 0 0;
+  color: #8a9099;
+  font-size: 11px;
+}
+
+.body.is-wide .source-editor {
+  flex: 1;
+}
+
+.layout-error {
+  margin: 8px 12px 0;
+}
+
+.block-source > .hint {
+  margin-top: 6px;
+  font-size: 11px;
+}
+
+.translation-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 10px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.translation-error > span {
+  flex: 1;
+  min-width: 0;
+}
+
+.body.is-wide .translation-error {
+  min-height: 0;
   overflow-y: auto;
 }
 

@@ -1,4 +1,4 @@
-//! 配置持久化：DeepSeek 的 base_url / model / API Key。
+//! 配置持久化：DeepSeek 的 base_url / model / API Key，以及用户选择的面板布局。
 //!
 //! **API Key 用 Windows DPAPI 加密后落盘**（`CryptProtectData`）：密文只有同一个
 //! Windows 用户能解开，明文不写文件、不进日志、不进事件载荷。
@@ -32,6 +32,9 @@ struct StoredSettings {
     /// DPAPI 加密后的密钥，hex 编码
     #[serde(default)]
     api_key_protected: Option<String>,
+    /// 用户手动选择的布局；未选择时继续按原文长度自动决定。
+    #[serde(default)]
+    panel_wide: Option<bool>,
 }
 
 /// 密钥是从哪来的——界面上要如实显示，避免"我明明设了却不生效"的困惑
@@ -68,6 +71,10 @@ fn read_stored(app: &AppHandle) -> StoredSettings {
 
 fn read_stored_at_path(path: &Path) -> StoredSettings {
     let _guard = CONFIG_IO_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    read_stored_unlocked(path)
+}
+
+fn read_stored_unlocked(path: &Path) -> StoredSettings {
     match std::fs::read_to_string(path) {
         // 已有新配置（包括损坏的配置）都优先，不重新导入用户已清除的旧设置。
         Ok(text) => return serde_json::from_str(&text).unwrap_or_default(),
@@ -125,14 +132,30 @@ fn migrate_stored(path: &Path, text: &str) -> std::io::Result<bool> {
     Ok(true)
 }
 
-fn write_stored(app: &AppHandle, stored: &StoredSettings) -> Result<(), String> {
+/// 布局切换与设置窗口可能同时保存，整个读改写过程共用一把锁，防止相互覆盖。
+fn update_stored_at_path(
+    path: &Path,
+    update: impl FnOnce(&mut StoredSettings) -> Result<(), String>,
+) -> Result<(), String> {
     let _guard = CONFIG_IO_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let path = config_path(app)?;
+    let mut stored = read_stored_unlocked(path);
+    update(&mut stored)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("创建配置目录失败：{e}"))?;
     }
-    let text = serde_json::to_string_pretty(stored).map_err(|e| e.to_string())?;
-    std::fs::write(&path, text).map_err(|e| format!("写入配置失败：{e}"))
+    let text = serde_json::to_string_pretty(&stored).map_err(|e| e.to_string())?;
+    std::fs::write(path, text).map_err(|e| format!("写入配置失败：{e}"))
+}
+
+pub fn load_panel_layout(app: &AppHandle) -> Option<bool> {
+    read_stored(app).panel_wide
+}
+
+pub fn save_panel_layout(app: &AppHandle, wide: bool) -> Result<(), String> {
+    update_stored_at_path(&config_path(app)?, |stored| {
+        stored.panel_wide = Some(wide);
+        Ok(())
+    })
 }
 
 pub fn load(app: &AppHandle) -> Settings {
@@ -185,21 +208,21 @@ pub fn save(
     model: &str,
     api_key: Option<&str>,
 ) -> Result<(), String> {
-    let mut stored = read_stored(app);
-    stored.base_url = Some(base_url.trim().to_string());
-    stored.model = Some(model.trim().to_string());
+    update_stored_at_path(&config_path(app)?, |stored| {
+        stored.base_url = Some(base_url.trim().to_string());
+        stored.model = Some(model.trim().to_string());
 
-    if let Some(key) = api_key {
-        let key = key.trim();
-        if key.is_empty() {
-            stored.api_key_protected = None;
-        } else {
-            let blob = dpapi::protect(key.as_bytes())?;
-            stored.api_key_protected = Some(hex_encode(&blob));
+        if let Some(key) = api_key {
+            let key = key.trim();
+            if key.is_empty() {
+                stored.api_key_protected = None;
+            } else {
+                let blob = dpapi::protect(key.as_bytes())?;
+                stored.api_key_protected = Some(hex_encode(&blob));
+            }
         }
-    }
-
-    write_stored(app, &stored)
+        Ok(())
+    })
 }
 
 /// 配置文件路径，仅供界面显示（方便用户知道东西存在哪）
@@ -369,7 +392,37 @@ mod tests {
         assert_eq!(stored.model.as_deref(), Some("new-model"));
         assert!(stored.api_key_protected.is_none());
         assert!(stored.base_url.is_none());
+        assert!(stored.panel_wide.is_none());
         assert_eq!(std::fs::read_to_string(current).unwrap(), current_text);
+    }
+
+    #[test]
+    fn panel_layout_survives_reload_and_other_settings_changes() {
+        let fixture = SettingsFixture::new();
+        let current = fixture.current_path();
+        fixture.write(&current, LEGACY_SETTINGS);
+
+        for wide in [true, false] {
+            update_stored_at_path(&current, |stored| {
+                stored.panel_wide = Some(wide);
+                Ok(())
+            })
+            .unwrap();
+            // 模拟设置窗口之后保存模型，不能覆盖已选择的布局或已加密密钥。
+            update_stored_at_path(&current, |stored| {
+                stored.model = Some("updated-model".to_string());
+                Ok(())
+            })
+            .unwrap();
+
+            let reloaded = read_stored_at_path(&current);
+            assert_eq!(reloaded.panel_wide, Some(wide));
+            assert_eq!(reloaded.model.as_deref(), Some("updated-model"));
+            assert_eq!(
+                reloaded.api_key_protected.as_deref(),
+                Some("00112233aabbccdd")
+            );
+        }
     }
 
     #[test]
